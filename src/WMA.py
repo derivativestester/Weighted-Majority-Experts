@@ -27,6 +27,10 @@ def perfect_hindsight_strategy(df_grouped, initial_value=1000, plot=True):
             - value: Value
     '''
     # Select the best performing cik each new_fdate
+    # Ensure the 'new_fdate' is a datetime type
+    df_grouped['new_fdate'] = pd.to_datetime(df_grouped['new_fdate'])
+    
+    # Select the best performing cik each new_fdate
     perfect_hindsight = df_grouped.loc[df_grouped.groupby('new_fdate')['weighted_performance'].idxmax()]
     perfect_hindsight.sort_values(by='new_fdate', inplace=True)
 
@@ -36,7 +40,7 @@ def perfect_hindsight_strategy(df_grouped, initial_value=1000, plot=True):
         perfect_hindsight.loc[perfect_hindsight.index[i], 'value'] = perfect_hindsight.loc[perfect_hindsight.index[i-1], 'value'] * (1 + perfect_hindsight.loc[perfect_hindsight.index[i], 'weighted_performance'])
 
     if plot:
-        # Create a figure and a set of subplots
+        # Create a figure and a set of subplots for cumulative performance
         fig, axes = plt.subplots(1, 4, figsize=(20, 5), sharex=True)
 
         # Plot 'Value'
@@ -63,11 +67,38 @@ def perfect_hindsight_strategy(df_grouped, initial_value=1000, plot=True):
         axes[3].legend(['Risk Reward Ratio'])
         axes[3].grid(True)
 
-        # Adjust layout
+        # Adjust layout for cumulative performance plots
         plt.tight_layout()
         plt.show()
 
-    return perfect_hindsight
+    # Get the top performer for each quarter
+    df_grouped['quarter'] = df_grouped['new_fdate'].dt.to_period('Q')
+    top_performers = df_grouped.loc[df_grouped.groupby('quarter')['weighted_performance'].idxmax()]
+
+    # Extract the returns and CIKs of the top performers
+    returns = top_performers['weighted_performance']
+    cik_labels = top_performers['cik'].astype(str) + ' (' + top_performers['quarter'].astype(str) + ')'
+
+    if plot:
+        # Plot the returns in a bar chart
+        plt.figure(figsize=(15, 8))
+        bars = plt.bar(cik_labels, returns, edgecolor='black', alpha=0.7)
+        plt.title('Returns of Top Performers Each Quarter')
+        plt.xlabel('CIK (Quarter)')
+        plt.ylabel('Quarterly Return')
+        plt.xticks(rotation=90)
+        plt.grid(True, axis='y')
+
+        # Annotate the bars with the return values, rotated to avoid overlap
+        for bar in bars:
+            height = bar.get_height()
+            plt.annotate(f'{height:.2f}', xy=(bar.get_x() + bar.get_width() / 2, height),
+                        xytext=(0, 3), textcoords="offset points", ha='center', va='bottom', rotation=90)
+
+        plt.tight_layout()
+        plt.show()
+
+    return perfect_hindsight, top_performers
 
 def equal_weighted_strategy(df_grouped, initial_value=1000, plot=True):
     '''
@@ -150,6 +181,147 @@ def equal_weighted_strategy(df_grouped, initial_value=1000, plot=True):
         plt.show()
 
     return equal_weighted
+
+def greedy_strategy(df_grouped, beta_values, initial_value=1000):
+    '''
+    Greedy Strategy
+    
+    Parameters
+    ----------
+    df_grouped : DataFrame
+        A DataFrame with the following columns:
+            - new_fdate: Date
+            - cik: CIK
+            - weighted_performance: Weighted Performance
+            - weighted_risk: Weighted Risk
+    beta_values : list
+        A list of beta values to perform grid search
+    initial_value : float
+        Initial value to start the algorithm
+    
+    Returns
+    -------
+    best_performance : DataFrame
+        A DataFrame with the following columns:
+            - new_fdate: Date
+            - Performance: Performance
+            - Risk: Risk
+            - Value: Value
+            - Risk Reward Ratio: Risk Reward Ratio
+    best_weights : DataFrame
+        A DataFrame with the best weights for each CIK at each date
+    '''
+    def calculate_performance(df_grouped, beta):
+        df_grouped['new_fdate'] = pd.to_datetime(df_grouped['new_fdate'])
+        df_grouped['quarter'] = df_grouped['new_fdate'].dt.to_period('Q')
+        
+        performance_pivot = df_grouped.pivot(index='new_fdate', columns='cik', values='weighted_performance')
+        risk_pivot = df_grouped.pivot(index='new_fdate', columns='cik', values='weighted_risk')
+
+        # Initialize weights
+        weights = pd.DataFrame(1, index=performance_pivot.index, columns=performance_pivot.columns)
+
+        # Initialize DataFrame to store cumulative performance
+        cumulative_performance = pd.DataFrame(index=performance_pivot.index, columns=['Performance', 'Risk', 'Value'])
+        cumulative_performance['Value'] = initial_value
+
+        for i in range(1, len(weights)):
+            date = weights.index[i]
+            previous_date = weights.index[i-1]
+            
+            # Find the top performer
+            top_performer = performance_pivot.loc[previous_date].idxmax()
+            
+            # Reduce weights for all except the top performer
+            for cik in weights.columns:
+                if cik != top_performer:
+                    weights.at[date, cik] = weights.at[previous_date, cik] * beta
+                else:
+                    weights.at[date, cik] = weights.at[previous_date, cik]
+                    
+            # Normalize weights
+            weights.loc[date] /= weights.loc[date].sum()
+
+            # Calculate performance and risk
+            cumulative_performance.at[date, 'Performance'] = (weights.loc[previous_date] * performance_pivot.loc[previous_date]).sum()
+            cumulative_performance.at[date, 'Risk'] = (weights.loc[previous_date] * risk_pivot.loc[previous_date]).sum()
+            cumulative_performance.at[date, 'Value'] = cumulative_performance.at[previous_date, 'Value'] * (1 + cumulative_performance.at[date, 'Performance'])
+
+        cumulative_performance['Risk Reward Ratio'] = cumulative_performance['Performance'] / cumulative_performance['Risk']
+        
+        return cumulative_performance, weights
+
+    # Optimize for the best beta
+    best_beta = None
+    best_final_value = -np.inf
+    best_performance = None
+    best_weights = None
+
+    for beta in beta_values:
+        performance, weights = calculate_performance(df_grouped, beta)
+        final_value = performance['Value'].iloc[-1]
+
+        if final_value > best_final_value:
+            best_final_value = final_value
+            best_beta = beta
+            best_performance = performance
+            best_weights = weights
+
+    print(f"Optimal beta: {best_beta}")
+    print(f"Final value with optimal beta: {best_final_value}")
+
+    # Plot cumulative performance metrics
+    fig, axes = plt.subplots(1, 4, figsize=(20, 5), sharex=True)
+
+    # Plot 'Value'
+    axes[0].plot(best_performance.index, best_performance['Value'])
+    axes[0].set_title('Value')
+    axes[0].legend(['Value'])
+    axes[0].grid(True)
+
+    # Plot 'Performance'
+    axes[1].plot(best_performance.index, best_performance['Performance'])
+    axes[1].set_title('Performance')
+    axes[1].legend(['Performance'])
+    axes[1].grid(True)
+
+    # Plot 'Risk'
+    axes[2].plot(best_performance.index, best_performance['Risk'])
+    axes[2].set_title('Risk')
+    axes[2].legend(['Risk'])
+    axes[2].grid(True)
+
+    # Plot 'Risk Reward Ratio'
+    axes[3].plot(best_performance.index, best_performance['Risk Reward Ratio'])
+    axes[3].set_title('Risk Reward Ratio')
+    axes[3].legend(['Risk Reward Ratio'])
+    axes[3].grid(True)
+
+    plt.tight_layout()
+    plt.show()
+
+    # Plot final weights by percentage for each CIK
+    final_weights = best_weights.iloc[-1] * 100
+    final_weights = final_weights.sort_values(ascending=False)
+    
+    plt.figure(figsize=(15, 8))
+    bars = plt.bar(final_weights.index, final_weights.values, edgecolor='black', alpha=0.7)
+    plt.title('Final Weights by Percentage for Each CIK')
+    plt.xlabel('CIK')
+    plt.ylabel('Final Weight (%)')
+    plt.xticks(rotation=90)
+    plt.grid(True, axis='y')
+
+    # Annotate the bars with the weight values
+    for bar in bars:
+        height = bar.get_height()
+        plt.annotate(f'{height:.2f}%', xy=(bar.get_x() + bar.get_width() / 2, height),
+                     xytext=(0, 3), textcoords="offset points", ha='center', va='bottom', rotation=90)
+
+    plt.tight_layout()
+    plt.show()
+
+    return best_performance, best_weights
 
 def weighted_majority_algorithm(df_grouped, beta_values, initial_value=1000, plot=True):
     '''
