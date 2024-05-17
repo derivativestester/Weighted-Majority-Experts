@@ -120,4 +120,9 @@ def load_combined_grouped(df, df2):
     # group by cik and sum the weighted performance and weighted risk to reward ratio for each new_fdate
     df_grouped = df.groupby(['cik', 'new_fdate'])[['weighted_performance', 'weighted_risk']].sum().reset_index()
     df_grouped['risk_reward_ratio'] = df_grouped['weighted_performance'] / df_grouped['weighted_risk']
+
+    # rename each unique cik to a number
+    df_grouped['cik'] = df_grouped['cik'].astype('category')
+    df_grouped['cik'] = df_grouped['cik'].cat.codes
+
     return df_grouped
